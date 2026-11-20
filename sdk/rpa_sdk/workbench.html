@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>机器人渐进式自主平台</title>
+  <style>
+    :root{color-scheme:light;--ink:#1a222c;--muted:#506077;--paper:#fff;--canvas:#eff3f7;--line:#d5dee8;--blue:#185995;--warm:#8d352b}
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--canvas);color:var(--ink);font:15px/1.55 system-ui,-apple-system,"PingFang SC",sans-serif}
+    main{margin:auto;max-width:1100px;padding:28px 22px 45px}
+    h1{margin:0 0 15px;font-size:clamp(25px,5vw,34px);letter-spacing:-.04em}
+    h2{margin:0 0 12px;font-size:18px}
+    p{margin:9px 0}
+    section{padding:16px 18px;margin:0 0 15px;background:var(--paper);border:1px solid var(--line);border-radius:8px}
+    .columns{display:grid;grid-template-columns:1fr 1fr;gap:15px}
+    .muted{color:var(--muted)}
+    .row{display:flex;flex-wrap:wrap;align-items:end;gap:8px}
+    .row label{flex:1;min-width:94px}
+    label{display:block;font-weight:650}
+    input,select,textarea,button{font:inherit;border:1px solid #afbccc;border-radius:5px}
+    input,select,textarea{margin:4px 0 0;width:100%;padding:7px;color:var(--ink);background:#f9fbfd}
+    textarea{resize:vertical;font-family:ui-monospace,monospace;font-size:13px}
+    button{padding:7px 11px;background:white;color:var(--ink);cursor:pointer}
+    button.primary{background:var(--blue);border-color:var(--blue);color:white}
+    button.hold{color:var(--warm);border-color:#bb8c83}
+    button:disabled{opacity:.45;cursor:default}
+    button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+    #notice{min-height:1.55em;margin:12px 0 14px}
+    #notice.error{color:#902e23}
+    #sessionStatus{margin:10px 0;padding:8px 10px;background:#e9f2fa;overflow-wrap:anywhere}
+    .stack>label{margin:8px 0}
+    pre{margin:0;min-height:80px;max-height:370px;padding:10px;background:#eef3f7;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}
+    details{margin-top:12px}
+    summary{cursor:pointer;font-weight:650}
+    @media(max-width:760px){main{padding:20px 13px 28px}.columns{grid-template-columns:1fr;gap:0}}
+  </style>
+</head>
+<body>
+<main>
+  <h1>机器人渐进式自主平台</h1>
+  <div class="row">
+    <label>访问令牌<input id="token" type="password" autocomplete="off" placeholder="未配置时留空"></label>
+    <button id="refresh" type="button">刷新状态</button>
+  </div>
+  <p id="notice" role="status" aria-live="polite"></p>
+
+  <div class="columns">
+    <div>
+      <section>
+        <h2>建立会话</h2>
+        <div class="row">
+          <label>控制端<select id="controller"></select></label>
+          <label>机器人<select id="robot"></select></label>
+        </div>
+        <div class="row">
+          <label>工位<input id="workstation" value="bench-1" maxlength="128"></label>
+          <button id="open" class="primary" type="button">分配会话</button>
+        </div>
+      </section>
+      <section>
+        <h2>会话操作</h2>
+        <label>会话<select id="session"></select></label>
+        <p id="sessionStatus" aria-live="polite">尚未选择会话</p>
+        <div class="row">
+          <button type="button" data-op="arm" data-motion="enable">授权遥操</button>
+          <button type="button" data-op="hold" class="hold">保持</button>
+          <button type="button" data-op="resume" data-motion="resume">请求恢复</button>
+          <button type="button" data-op="close" class="hold">结束会话</button>
+        </div>
+        <p class="muted">授权和恢复由机器人本地条件决定。持续控制输入由控制端 SDK 发送。</p>
+        <details>
+          <summary>调试一帧输入或一个动作</summary>
+          <div class="stack">
+            <label>输入帧<textarea id="frame" rows="4">{"tracking": true}</textarea></label>
+            <button type="button" data-op="input" data-motion="frame">发送单帧</button>
+            <label>动作定义<textarea id="action" rows="4" placeholder="填入机器人适配器支持的动作 JSON"></textarea></label>
+            <button type="button" data-op="action" data-motion="action">提交动作</button>
+          </div>
+        </details>
+      </section>
+    </div>
+    <div>
+      <section>
+        <h2>录制任务</h2>
+        <div class="stack">
+          <label>任务名称<input id="task" value="demonstration" maxlength="128"></label>
+          <button type="button" data-op="record/start">开始录制</button>
+          <label>阶段标记<input id="mark" value="checkpoint" maxlength="128"></label>
+          <button type="button" data-op="record/mark">标记阶段</button>
+          <button type="button" data-op="record/stop">结束并提交</button>
+        </div>
+      </section>
+      <section>
+        <h2>设备与能力</h2>
+        <p id="deviceStatus" class="muted">等待读取</p>
+        <button id="health" type="button">读取所选机器人健康</button>
+        <pre id="healthResult" hidden></pre>
+        <details>
+          <summary>状态快照</summary>
+          <pre id="snapshot"></pre>
+        </details>
+      </section>
+    </div>
+  </div>
+</main>
+<script>
+  const element = id => document.getElementById(id);
+  const opButtons = [...document.querySelectorAll("[data-op]")];
+  const motionLabels = {
+    enable: "确认已完成现场预检，并授权此会话的控制？",
+    resume: "确认当前设备与环境允许恢复？",
+    frame: "确认向所选会话发送这帧控制输入？",
+    action: "确认执行此动作请求？",
+  };
+  let current = {controllers: [], robots: [], sessions: []};
+  let busy = false;
+  let refreshing = false;
+  let viewVersion = 0;
+  let mutationVersion = 0;
+  let stateKnown = false;
+
+  function tell(message, error = false) {
+    element("notice").textContent = message;
+    element("notice").classList.toggle("error", error);
+  }
+
+  async function request(path, data) {
+    const headers = {"Accept": "application/json"};
+    const token = element("token").value.trim();
+    if (token) headers.Authorization = "Bearer " + token;
+    const options = {headers, cache: "no-store", redirect: "error", credentials: "omit"};
+    if (data !== undefined) {
+      headers["Content-Type"] = "application/json";
+      options.method = "POST";
+      options.body = JSON.stringify(data);
+    }
+    const controller = new AbortController();
+    options.signal = controller.signal;
+    const timeout = window.setTimeout(() => controller.abort(), 6000);
+    try {
+      const response = await fetch(path, options);
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || ("HTTP " + response.status));
+      return result;
+    } catch (error) {
+      if (error.name === "AbortError") throw new Error("请求超时，结果未确认。请刷新状态。");
+      throw error;
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }
+
+  function setOptions(id, items, value, label, preferred) {
+    const select = element(id);
+    const prior = preferred || select.value;
+    select.replaceChildren();
+    items.forEach(item => {
+      const option = document.createElement("option");
+      option.value = item[value];
+      option.textContent = label(item);
+      select.append(option);
+    });
+    if (items.some(item => item[value] === prior)) select.value = prior;
+  }
+
+  function selectedSession() {
+    return current.sessions.find(item => item.session_id === element("session").value);
+  }
+
+  function renderSession() {
+    const session = selectedSession();
+    const status = session ? [
+      !stateKnown && "上次确认",
+      session.state,
+      session.robot_id,
+      session.record_state !== "idle" && session.record_state,
+      session.episode_id && ("Episode " + session.episode_id),
+      session.fault && ("故障 " + session.fault),
+    ].filter(Boolean).join(" · ") : "尚未选择会话";
+    element("sessionStatus").textContent = status;
+    const robot = session && current.robots.find(item => item.robot_id === session.robot_id);
+    const hasActuator = robot && robot.capabilities && robot.capabilities.motion !== false;
+    const allowed = new Set();
+    if (session && !["released", "closing", "closed"].includes(session.state)) {
+      allowed.add("close");
+      if (hasActuator) allowed.add("hold");
+      if (stateKnown && hasActuator) {
+        if (session.state === "assigned") allowed.add("arm");
+        if (session.state === "hold") allowed.add("resume");
+        if (["armed", "live"].includes(session.state)) allowed.add("input");
+        if (["assigned", "hold"].includes(session.state)) allowed.add("action");
+        if (["armed", "live", "hold"].includes(session.state) && session.record_state === "idle") {
+          allowed.add("record/start");
+        }
+        if (session.record_state === "recording") {
+          allowed.add("record/mark");
+          allowed.add("record/stop");
+        }
+      }
+    }
+    opButtons.forEach(button => {
+      button.disabled = !allowed.has(button.dataset.op) || (busy && button.dataset.op !== "hold");
+    });
+    const selected = current.robots.find(item => item.robot_id === element("robot").value);
+    element("open").disabled = busy || !stateKnown || !element("controller").value ||
+      !selected || (selected.capabilities && selected.capabilities.motion === false);
+    element("health").disabled = busy || !element("robot").value;
+  }
+
+  async function refresh(preferred) {
+    const version = ++viewVersion;
+    const snapshot = await request("/v1/status");
+    if (version !== viewVersion) return;
+    current = snapshot;
+    stateKnown = true;
+    setOptions("controller", current.controllers, "controller_id", item => item.controller_id);
+    setOptions("robot", current.robots, "robot_id", item => item.robot_id + " · " + item.robot_type);
+    setOptions("session", current.sessions, "session_id",
+      item => item.workstation_id + " · " + item.state + " · " + item.session_id, preferred);
+    element("deviceStatus").textContent = current.controllers.length + " 个控制端，" +
+      current.robots.length + " 台机器人，" + current.sessions.length + " 个会话";
+    element("snapshot").textContent = JSON.stringify(snapshot, null, 2);
+    renderSession();
+  }
+
+  async function sync(reportErrors) {
+    if (refreshing || busy) return;
+    const expectedVersion = viewVersion + 1;
+    refreshing = true;
+    try {
+      await refresh();
+      if (reportErrors) tell("状态已刷新");
+    } catch (error) {
+      if (expectedVersion === viewVersion) {
+        stateKnown = false;
+        if (reportErrors || error.message.includes("bearer")) tell(error.message, true);
+        element("deviceStatus").textContent = "当前状态不可确认";
+        renderSession();
+      }
+    } finally {
+      refreshing = false;
+    }
+  }
+
+  async function mutation(operation, allowBusy = false) {
+    if (busy && !allowBusy) return;
+    const version = ++mutationVersion;
+    viewVersion++;
+    busy = true;
+    renderSession();
+    try {
+      const reply = await operation();
+      if (version !== mutationVersion) return;
+      tell("请求已返回，正在读取状态");
+      try {
+        await refresh(reply.session_id);
+        if (version === mutationVersion) tell("状态已同步");
+      } catch (error) {
+        if (version === mutationVersion) {
+          stateKnown = false;
+          tell("请求已返回，状态暂不可确认：" + error.message, true);
+        }
+      }
+    } catch (error) {
+      if (version === mutationVersion) {
+        stateKnown = false;
+        tell(error.message, true);
+      }
+    } finally {
+      if (version === mutationVersion) {
+        busy = false;
+        renderSession();
+      }
+    }
+  }
+
+  function operationBody(operation, session) {
+    if (operation === "record/start") return {task: element("task").value.trim()};
+    if (operation === "record/mark") return {label: element("mark").value.trim()};
+    if (operation === "record/stop") return {outcome: "complete"};
+    if (operation === "action") return JSON.parse(element("action").value);
+    if (operation === "input") {
+      const data = JSON.parse(element("frame").value);
+      if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("输入帧必须为 JSON 对象");
+      if (data.sequence === undefined) {
+        data.sequence = Number.isSafeInteger(session.last_sequence) ? session.last_sequence + 1 : 1;
+      }
+      return data;
+    }
+    return {};
+  }
+
+  element("session").addEventListener("change", renderSession);
+  element("robot").addEventListener("change", () => {
+    element("healthResult").hidden = true;
+    renderSession();
+  });
+  element("controller").addEventListener("change", renderSession);
+  element("refresh").addEventListener("click", () => sync(true));
+  element("open").addEventListener("click", () => mutation(() => request("/v1/sessions", {
+    controller_id: element("controller").value,
+    robot_id: element("robot").value,
+    workstation_id: element("workstation").value.trim(),
+  })));
+  element("health").addEventListener("click", async () => {
+    const robotId = element("robot").value;
+    try {
+      const result = await request("/v1/robots/" + encodeURIComponent(robotId) + "/health");
+      if (element("robot").value !== robotId) return;
+      element("healthResult").textContent = JSON.stringify(result, null, 2);
+      element("healthResult").hidden = false;
+      tell("设备健康已读取");
+    } catch (error) {
+      tell(error.message, true);
+    }
+  });
+  opButtons.forEach(button => button.addEventListener("click", () => {
+    const session = selectedSession();
+    if (!session) return;
+    if (button.dataset.motion && !window.confirm(motionLabels[button.dataset.motion])) return;
+    mutation(() => request("/v1/sessions/" + encodeURIComponent(session.session_id) + "/" + button.dataset.op,
+      operationBody(button.dataset.op, session)), button.dataset.op === "hold");
+  }));
+  renderSession();
+  sync(true);
+  window.setInterval(() => sync(false), 1000);
+</script>
+</body>
+</html>
