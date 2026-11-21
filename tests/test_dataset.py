@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from rpa_sdk.dataset import EpisodeStore, clean_episode, export_dataset, import_savvy2, verify_episode
+from rpa_sdk.dataset import EpisodeStore, clean_episode, export_dataset, import_legacy_episode, verify_episode
 
 
 def _json(path, value):
@@ -165,13 +165,13 @@ class EpisodeTests(unittest.TestCase):
         derived = clean_episode(self.store.root / demo, self.root / "demo_failed")
         self.assertEqual(derived["quality"]["grade"], "A")
 
-    def test_import_savvy2_native_events_and_media(self):
+    def test_import_legacy_native_events_and_media(self):
         legacy = self.root / "legacy"
         image = legacy / "images/head/00000001.jpg"
         image.parent.mkdir(parents=True)
         image.write_bytes(b"\xff\xd8example\xff\xd9")
         _json(legacy / "episode_meta.json", {
-            "schema_version": "savvy2.episode.meta.v1", "episode_id": "old",
+            "schema_version": "lab.robot.episode.meta.v1", "episode_id": "old",
             "session_id": "s1", "task_name": "pick", "result": "success",
             "required": {"arms": ["arm_a"], "cameras": ["head"]},
         })
@@ -183,19 +183,23 @@ class EpisodeTests(unittest.TestCase):
             {"event_type": "arm_state", "stream": "arm_a", "mono_ns": 2, "payload": {"q_deg": [0] * 7}},
         ])
         _jsonl(legacy / "frames.jsonl", [{
-            "schema_version": "savvy2.episode.frame.v1", "frame_mono_ns": 5,
+            "schema_version": "lab.robot.episode.frame.v1", "frame_mono_ns": 5,
             "images": {"head": "images/head/00000001.jpg"},
             "capture_ts": {"image.head": 2}, "recv_ts": {"image.head": 3},
         }])
         (legacy / "checksums.sha256").write_text(_manifest(legacy), encoding="utf-8")
-        imported = import_savvy2(legacy, self.store.root)
+        with self.assertRaisesRegex(ValueError, "metadata schema"):
+            import_legacy_episode(legacy, self.store.root, schema_namespace="other")
+        imported = import_legacy_episode(legacy, self.store.root, schema_namespace="lab.robot")
         path = self.store.root / imported["episode_id"]
         self.assertTrue(verify_episode(path)["ok"])
+        self.assertEqual(imported["metadata"]["source_format"], "legacy.episode.v1")
         self.assertEqual(imported["metadata"]["source_quality_grade"], "B")
         self.assertEqual(imported["streams"]["images.head"], 1)
         rows = [json.loads(line) for line in (path / "events.jsonl").read_text().splitlines()]
         applied = next(row for row in rows if row["stream"] == "applied.arm.arm_a")
         self.assertEqual(applied["data"]["q_rad"], [math.pi / 2] * 7)
+        self.assertEqual(applied["data"]["source_event"]["event_type"], "arm_applied")
         self.assertTrue(image.exists())
 
 

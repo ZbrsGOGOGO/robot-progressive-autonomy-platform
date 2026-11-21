@@ -10,8 +10,8 @@ from rpa_sdk.contracts import validate_frame
 from rpa_sdk.legacy import (
     LegacyAgentRegistry,
     LegacyPicoReceiver,
-    Savvy2RecorderClient,
-    Savvy2RobotAdapter,
+    LegacyRecorderClient,
+    LegacyRobotAdapter,
     frame_to_legacy_pico,
     legacy_pico_to_frame,
     make_legacy_server,
@@ -125,10 +125,10 @@ class AgentInteropTests(unittest.TestCase):
     def test_agent_handshake_has_no_motion_commands(self):
         registry = LegacyAgentRegistry()
         with _serving(make_legacy_server(registry)) as base:
-            poll = base + "/api/poll?device_id=savvy2-fixture"
+            poll = base + "/api/poll?device_id=robot-fixture"
             self.assertFalse(_request(poll)["known"])
             self.assertTrue(_request(base + "/api/register", {
-                "device_id": "savvy2-fixture",
+                "device_id": "robot-fixture",
                 "device_type": "robot",
                 "capabilities": {"controls": ["dual_arm"]},
             })["ok"])
@@ -136,9 +136,10 @@ class AgentInteropTests(unittest.TestCase):
                 "ok": True, "known": True, "commands": [],
             })
             self.assertTrue(_request(base + "/api/report", {
-                "device_id": "savvy2-fixture", "conn_id": "local-fixture", "state": "running",
+                "device_id": "robot-fixture", "conn_id": "local-fixture", "state": "running",
             })["ok"])
-        robot = Savvy2RobotAdapter("savvy2-fixture", registry=registry)
+        robot = LegacyRobotAdapter("robot-fixture", registry=registry)
+        self.assertEqual(robot.snapshot()["robot_type"], "robot")
         self.assertEqual(robot.snapshot()["agent"]["report"]["state"], "running")
         self.assertFalse(robot.readiness()["ready"])
         self.assertFalse(robot.hold()["confirmed"])
@@ -163,7 +164,8 @@ class _FakeRecorderHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.assert_status_path()
         self._send({
-            "recorder": "savvy2", "recording": self.server.episode_id is not None,
+            "recorder": self.server.recorder_id,
+            "recording": self.server.episode_id is not None,
             "episode_id": self.server.episode_id,
         })
 
@@ -188,16 +190,21 @@ class _FakeRecorderHandler(BaseHTTPRequestHandler):
 
 
 class RecorderInteropTests(unittest.TestCase):
-    def test_local_read_and_owned_write_through_real_http(self):
+    def _recorder_server(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), _FakeRecorderHandler)
+        server.recorder_id = "lab-recorder"
         server.episode_id = None
         server.calls = []
+        return server
+
+    def test_local_read_and_owned_write_through_real_http(self):
+        server = self._recorder_server()
         with _serving(server) as base:
-            readonly = Savvy2RecorderClient(base)
+            readonly = LegacyRecorderClient(base, recorder_id="lab-recorder")
             self.assertFalse(readonly.status()["recording"])
             with self.assertRaises(RuntimeError):
                 readonly.start("demo", conn_id="session-fixture")
-            writer = Savvy2RecorderClient(base, allow_write=True)
+            writer = LegacyRecorderClient(base, recorder_id="lab-recorder", allow_write=True)
             self.assertEqual(writer.start("demo", conn_id="session-fixture")["episode_id"], "ep_fixture")
             self.assertEqual(writer.mark("reach")["mark"], "reach")
             self.assertTrue(writer.stop("success")["ok"])
@@ -206,7 +213,31 @@ class RecorderInteropTests(unittest.TestCase):
             [call[0] for call in server.calls], ["/rec/start", "/rec/mark", "/rec/stop"],
         )
 
+    def test_recorder_identity_mismatch_prevents_writes(self):
+        server = self._recorder_server()
+        with _serving(server) as base:
+            unmatched = LegacyRecorderClient(base, recorder_id="Lab-recorder", allow_write=True)
+            with self.assertRaisesRegex(ValueError, "identity"):
+                unmatched.status()
+            with self.assertRaisesRegex(ValueError, "identity"):
+                unmatched.start("demo", conn_id="session-fixture")
+            self.assertEqual(server.calls, [])
+
+            writer = LegacyRecorderClient(base, recorder_id="lab-recorder", allow_write=True)
+            writer.start("demo", conn_id="session-fixture")
+            server.recorder_id = "lab-replacement"
+            with self.assertRaisesRegex(ValueError, "identity"):
+                writer.mark("reach")
+            with self.assertRaisesRegex(ValueError, "identity"):
+                writer.stop()
+        self.assertEqual([call[0] for call in server.calls], ["/rec/start"])
+
     def test_reject_non_loopback(self):
         for endpoint in ("http://example.test:7005", "http://127.0.0.1:7005/redirect"):
             with self.subTest(endpoint=endpoint), self.assertRaises(ValueError):
-                Savvy2RecorderClient(endpoint)
+                LegacyRecorderClient(endpoint, recorder_id="lab-recorder")
+
+    def test_reject_invalid_recorder_id(self):
+        for recorder_id in ("", "lab recorder", "lab/recorder", "a" * 129):
+            with self.subTest(recorder_id=recorder_id), self.assertRaisesRegex(ValueError, "recorder_id"):
+                LegacyRecorderClient("http://127.0.0.1:7005", recorder_id=recorder_id)

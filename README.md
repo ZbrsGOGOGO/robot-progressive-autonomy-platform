@@ -1,6 +1,6 @@
 # 机器人渐进式自主平台
 
-面向多控制端和多机器人类型的公共 SDK。将 Pico / Unity、Web 工位和脚本的输入收敛到同一接口，将工位分配、运动授权、停止确认、状态上报、示范采集与数据清洗接到同一个会话。项目从 Savvy2 的 Pico、平台和采集分工抽取通用能力，适用范围按下表标注。
+面向多控制端和多机器人类型的公共 SDK。Web 工位、Python 脚本和可选 XR 客户端使用同一输入接口。运行时管理工位分配、运动授权、保持与释放，并将操作者意图、控制目标、本体反馈和任务标记关联到同一会话。原始数据提交后可独立校验、清洗和导出。
 
 ## 十分钟跑通
 
@@ -10,16 +10,16 @@
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install .
-rpa serve --episodes ./episodes --input-timeout-ms 5000
+rpa serve --port 0 --episodes ./episodes --input-timeout-ms 5000
 ```
 
-打开 [本地工位](http://127.0.0.1:8765/)。选择 Web/Pico/Python 控制端、双臂或移动底盘模拟器，创建会话。授权后，在输入超时前发送一个跟踪有效且按钮中立的样本。示例将模拟超时放宽到 5 秒，便于手动点选。默认 350 毫秒用于测试失联，连续输入请使用 Pico 示例或 Python 客户端。模拟器停止并确认后释放工位。
+打开启动时打印的工作台地址。选择控制端和双臂或移动底盘模拟器，创建会话。授权后，在输入超时前发送一个追踪有效的中立输入帧。示例将模拟超时放宽到 5 秒，便于手动点选。默认 350 毫秒用于测试失联，连续输入可使用 Python 客户端或 XR 示例。模拟器停止并确认后释放工位。
 
 无需启动服务的一键演示会创建一个模拟 Episode，并打印其 ID：
 
 ```bash
 rpa demo --episodes ./episodes
-EPISODE_DIR=./episodes/ep_填入打印的ID
+EPISODE_DIR="./episodes/填入打印的episode_id"
 python -m rpa_sdk.dataset verify "$EPISODE_DIR"
 python -m rpa_sdk.dataset clean "$EPISODE_DIR" ./datasets/aligned-demo
 ```
@@ -33,16 +33,16 @@ PYTHONPATH=sdk python3 -m unittest discover -s tests -v
 
 ## 功能与接入范围
 
-| 能力 | 公共 SDK | Savvy2 既有系统接入 |
+| 能力 | 公共 SDK | 可选接入 |
 | --- | --- | --- |
-| 多控制端 | Web 工作台、Python SDK、Pico Unity XR 输入示例、统一输入帧 | Legacy TrackingData 双向编解码及限量读取 |
-| 多机器人 | `RobotAdapter`、能力发现、双臂与移动底盘两种模拟适配 | Savvy2 观察适配器，可读取旧 Agent 注册/报告和录像状态 |
-| 工位与会话 | 工位、控制端和机器人互斥。显式授权、Hold、恢复和释放 | 旧平台注册、轮询、上报提供 loopback 兼容路径。原平台页面、数据库、角色与工位不迁移 |
-| 运动与安全 | 递增序号、跟踪丢失和新鲜度门、中立恢复、停止确认。最终限制在本体适配器内 | 双臂、夹爪、腰头、底盘、原 IK、重锚、标定与厂商驱动继续在原机器人栈运行 |
-| 任务与动作 | 关节关键帧预览。模拟器可应用离线终态，适合校验数据和会话 | 原 Action Studio 执行仍由原 Agent/本体会话接管。无公共真机执行器 |
-| 视频与传感器 | 状态与能力接口，数采支持独立 PNG/JPEG 与相机角色 | 兼容说明给出健康、MJPEG、Agora 对接位置。采集硬件和公网媒体服务继续由原部署提供 |
-| 数据采集 | 记录意图、处理后命令、实际下发、实测反馈、图像和任务标记。独立有界写队列 | Savvy2 Recorder HTTP 客户端和 Savvy2 V1 已提交 Episode 导入 |
-| 清洗与训练导出 | SHA-256 校验、因果对齐、新鲜度掩码、A/B/C 质检、整条 Episode 切分 | 输出可追溯 JSONL 和图像。LeRobot、ROS bag 或其他目标格式使用独立导出适配 |
+| 多控制端 | Web 工作台、Python SDK、统一输入帧 | Pico Unity XR 示例、TrackingData 编解码和本机限量回放 |
+| 多机器人 | `RobotAdapter`、能力发现、双臂和移动底盘模拟器 | `LegacyRobotAdapter` 读取兼容设备的注册、上报和录像状态 |
+| 工位与会话 | 工位、控制端和机器人互斥，显式授权、保持、恢复和释放 | 可在 loopback 上观察旧设备的注册、心跳和状态报告 |
+| 运动与安全 | 检查输入序号和追踪状态，支持失联保持、中立恢复和停止确认 | 真机集成由本地控制器负责标定、运动限制、看门狗和停止确认 |
+| 任务与动作 | 关节关键帧预览，模拟器可应用离线终态 | 外部轨迹可按统一关键帧格式进行预检 |
+| 视频与传感器 | 状态与能力接口，支持按相机角色记录 PNG/JPEG | 实时媒体、相机驱动和硬件同步由设备集成提供 |
+| 数据采集 | 有界后台队列记录意图、控制目标、实际下发、实测反馈、图像和任务标记 | `LegacyRecorderClient` 接入本机 Recorder，也可离线导入已提交的兼容 v1 Episode |
+| 清洗与训练导出 | SHA-256 校验、因果对齐、新鲜度掩码、A/B/C 质检和整条 Episode 切分 | 可用独立适配器将输出 JSONL 和图像转换到 LeRobot 等目标格式 |
 
 ## 渐进式自主
 
@@ -54,7 +54,7 @@ PYTHONPATH=sdk python3 -m unittest discover -s tests -v
 ## API 与接入说明
 
 - [统一帧、平台 REST、机器人适配和执行边界](docs/api.md)
-- [Pico Unity、Savvy2 旧协议、Agent、Recorder 与媒体](docs/savvy2-pico.md)
+- [可选 Pico Unity XR、旧设备协议和 Recorder 接入](docs/integrations.md)
 - [Episode、校验、清洗和导出](docs/data.md)
 - [平台迁移与兼容映射](docs/platform-migration.md)
 
@@ -64,4 +64,4 @@ PYTHONPATH=sdk python3 -m unittest discover -s tests -v
 
 内置 HTTP 服务是开发工作台，默认仅监听 loopback。跨机接入至少使用 TLS、身份和工位权限，并将本体看门狗与停止链留在控制器侧。参考服务的共享 Bearer token 只适合受控联调环境。进程重启后的持久化工位恢复、生产角色权限、标定及物理急停需要在部署层落实。
 
-仓库不包含原私有仓库历史、现场配置、SDK 二进制、APK、密钥或数据。厂商 SDK 通过原工程的授权环境提供。离线和 loopback 测试覆盖通用链路，Unity 构建、实机动作和媒体端到端需要目标设备验收。
+默认安装可独立运行模拟、录制和离线处理。现场配置、厂商驱动和真实采集数据由使用方管理。离线和 loopback 测试覆盖公共协议和数据链路，Unity 构建、实机动作和实时媒体需要在目标设备上单独验收。

@@ -35,7 +35,7 @@ result = store.stop(episode_id, outcome="success")
 
 例如 `applied.arm_a` 和 `applied.arm_b` 分别记录左右臂。任务若要求两路都到齐，应显式列出两路。把 `applied` 列为必需时，任一该类子流有效即可计入覆盖。未获得实际反馈时省略 `measured` 事件，清洗后的空值反映真实缺失。
 
-有真实图像 bytes 时调用 `store.append_image(episode_id, "head", jpeg_bytes, t_mono_ns=stamp, metadata={...})`。支持 JPEG 和 PNG，验证文件签名和大小，图像解码完整性由相机适配或下游检查实现。无图像的仿真可单独写视觉状态事件。记录图片采集时间和来源不会自动获得硬件同步，只有现场证据支持时才设置 `clock_verified=True`。
+有真实图像 bytes 时调用 `store.append_image(episode_id, "head", jpeg_bytes, t_mono_ns=stamp, metadata={...})`。JPEG 是默认编码，PNG 需显式传入 `encoding="png"`。SDK 校验文件签名和大小，图像能否完整解码由相机适配器或下游流程检查。无图像的仿真可单独写视觉状态事件。只有经实际同步验证的采集才设置 `clock_verified=True`。
 
 ## 目录与提交
 
@@ -57,10 +57,9 @@ recordings/
 ## CLI 和质量
 
 ~~~bash
-python -m rpa_sdk.dataset verify recordings/ep_<id>
-python -m rpa_sdk.dataset clean recordings/ep_<id> aligned/pick-001 --hz 30 --max-age-ms 100 --require-stream applied --require-stream measured
-python -m rpa_sdk.dataset export training/pick-v1 recordings/ep_<id1> recordings/ep_<id2> --allow-b
-python -m rpa_sdk.dataset import-savvy2 /path/to/finalized/savvy2-episode recordings
+python -m rpa_sdk.dataset verify "recordings/ep_<id>"
+python -m rpa_sdk.dataset clean "recordings/ep_<id>" aligned/pick-001 --hz 30 --max-age-ms 100 --require-stream applied --require-stream measured
+python -m rpa_sdk.dataset export training/pick-v1 "recordings/ep_<id1>" "recordings/ep_<id2>" --allow-b
 ~~~
 
 路径中的 `<id>` 请替换成真实值。清洗不写源目录，导出到已存在的目录会拒绝。清洗同时生成 `frames.jsonl`、`manifest.json`、`quality.json`、被实际引用的媒体和校验清单。同一次 Episode 超过 1,000,000 帧时拒绝生成派生文件，可按原任务缩短采集窗口或使用更低导出帧率。
@@ -68,14 +67,24 @@ python -m rpa_sdk.dataset import-savvy2 /path/to/finalized/savvy2-episode record
 默认 30 Hz 对齐。每个切点取各路事件中时间不晚于切点的最后一条。缺失或超龄时写 `data: null`，保留来源索引、时间、年龄、有效性和新鲜样本标志。先校验原生事件，再派生对齐记录。清洗不生成未来填充，也不装作实测值齐全。质量等级规则是：
 
 - A：必需流至少 90%，时钟已验证，未见记录到的控制器错误或来源降级。
-- B：有必需流低于 90% 且不少于 50%，或缺少可信时钟、原始 Savvy2 质量最高为 B。
+- B：有必需流低于 90% 且不少于 50%，或时钟未经验证，或原始质量标为 B。
 - C：无对齐帧、必需流低于 50%、检测到控制器故障，或采集注明不可用。
 
 损坏、校验失败和时间倒退会直接拒绝校验。默认数据集只接受 A，明确加 `--allow-b` 才接纳 B，C 永远不发布。整条 Episode 按 seed 和 Episode ID 的 SHA-256 桶切分，目标比例约 80/10/10，小样本可能缺一组。生产评测需要依机器人、场景、工件和采集者分组时，使用业务侧确定的独立切分。
 
-## 兼容 Savvy2 V1
+## 离线导入兼容 v1 Episode
 
-适配器读取本地已完成 Savvy2 Episode 的 `events.jsonl`、`frames.jsonl`、原始元数据、质量清单和校验值。语义流映射覆盖 Pico 意图、双臂 IK/指令/实际下发/反馈、夹爪、底盘、腰头、任务标记和各角色原始 JPEG。关节角常见 deg 字段还转换为 `q_rad`，原载荷仍保留。相机路径按首次出现去重，时序优先使用机器人编码捕获时间，再回落到接收或原帧切点，并保存来源。源时钟不确定，不升级历史数据的质量等级。原始 Episode 保持原样，后加的人工 `annotations.json` 不作为原始校验数据导入。
+~~~bash
+python -m rpa_sdk.dataset import-legacy /source/episode /dest --schema-namespace robot
+~~~
+
+仅支持已提交的特定兼容 v1 目录格式。导入器按 `--schema-namespace` 核对 `episode_meta.json` 和每条 `frames.jsonl` 记录的 `schema_version`。例如使用 `robot` 时，分别要求 `robot.episode.meta.v1` 和 `robot.episode.frame.v1`，两处必须属于同一命名空间。改命名空间只改变期望的 schema 标识，源文件、字段和校验规则保持不变。
+
+源目录还须包含 `events.jsonl`、含 A/B/C 等级的 `quality_manifest.json` 和 `checksums.sha256`。导入器校验文件哈希、帧时间递增和图像引用，图像必须来自对应相机角色、已列入校验清单且采集时间不晚于引用帧。导入产物提交到独立目标目录，源目录与内容保持原样。后加的 `annotations.json` 可留在原目录，无需参与转换。
+
+导入映射覆盖 XR 意图、机械臂 IK 目标、控制目标、实际下发值、反馈，以及夹爪、底盘、腰部、任务标记和各角色 JPEG。可识别的关节角度字段转换为 `q_rad`，原载荷仍保留。相机按角色与相对路径去重，时间优先使用机器人端编码捕获时间，缺少时使用接收时间，再缺少时使用首次引用的源帧切点。记录时间依据和来源，导入数据的 `clock_verified` 为 `false`，清洗等级最高为 B，源质量 C 仍判 C。
+
+## 接入训练格式
 
 统一导出产物是 JSONL、媒体和完整 Episode 划分。接 LeRobot 时，观测取真实双臂状态 q_rad，动作取实际下发 q_rad，左右臂按机型 profile 固定关节顺序，夹爪、底盘和腰头分别用任务定义的字段。SDK 不执行 RGB 解码、视频编解码或具体 LeRobot 版本的 Parquet 提交。训练平台可以在校验清单的约束下完成转换。
 

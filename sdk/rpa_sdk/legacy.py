@@ -1,4 +1,4 @@
-"""Savvy2 and Pico wire compatibility without implicit actuator authority."""
+"""Optional legacy wire compatibility without implicit actuator authority."""
 
 import copy
 import ipaddress
@@ -283,7 +283,7 @@ def _validate_id(value, name):
 
 
 class LegacyAgentRegistry:
-    """Read-only management plane for existing Pico and Savvy2 agents."""
+    """Read-only management plane for existing input and robot agents."""
 
     def __init__(self, *, max_devices: int = 64):
         if type(max_devices) is not int or not 1 <= max_devices <= 1024:
@@ -404,10 +404,13 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
-class Savvy2RecorderClient:
+class LegacyRecorderClient:
     """Local Recorder API with explicit single-owner write opt-in."""
 
-    def __init__(self, base_url: str, *, allow_write: bool = False, timeout_s: float = 3.0):
+    def __init__(
+        self, base_url: str, *, recorder_id: str,
+        allow_write: bool = False, timeout_s: float = 3.0,
+    ):
         url = urlsplit(base_url)
         try:
             address = ipaddress.ip_address(url.hostname or "")
@@ -420,6 +423,7 @@ class Savvy2RecorderClient:
         ):
             raise ValueError("Recorder URL must be an HTTP loopback origin")
         self._origin = base_url.rstrip("/")
+        self._recorder_id = _validate_id(recorder_id, "recorder_id")
         self._timeout = _number(timeout_s, "timeout_s", (0.05, 120.0))
         self._allow_write = _boolean(allow_write, "allow_write")
         self._opener = build_opener(ProxyHandler({}), _NoRedirect())
@@ -451,8 +455,10 @@ class Savvy2RecorderClient:
 
     def status(self) -> dict:
         result = self._request("/rec/status")
-        if result.get("recorder") != "savvy2" or type(result.get("recording")) is not bool:
-            raise ValueError("endpoint is not a Savvy2 Recorder")
+        if result.get("recorder") != self._recorder_id:
+            raise ValueError("Recorder identity does not match recorder_id")
+        if type(result.get("recording")) is not bool:
+            raise ValueError("Recorder status must include a boolean recording state")
         return result
 
     def start(
@@ -466,7 +472,7 @@ class Savvy2RecorderClient:
         if not isinstance(operator_id, str) or len(operator_id) > 128:
             raise ValueError("operator_id must be a bounded string")
         if transport not in ("lan", "agora"):
-            raise ValueError("unknown Savvy2 Recorder transport")
+            raise ValueError("unknown Recorder transport")
         body = {
             "task_name": task_name,
             "conn_id": _validate_id(conn_id, "conn_id"),
@@ -508,15 +514,15 @@ class Savvy2RecorderClient:
             return reply
 
 
-class Savvy2RobotAdapter:
+class LegacyRobotAdapter:
     """Discovery and diagnostics for legacy deployments. Motion is unavailable."""
 
-    robot_type = "savvy2"
+    robot_type = "robot"
 
     def __init__(
         self, robot_id: str, *,
         registry: Optional[LegacyAgentRegistry] = None,
-        recorder: Optional[Savvy2RecorderClient] = None,
+        recorder: Optional[LegacyRecorderClient] = None,
     ):
         self.robot_id = _validate_id(robot_id, "robot_id")
         self._registry = registry
@@ -535,7 +541,7 @@ class Savvy2RobotAdapter:
         return {"ready": False, "reason": "verified_actuator_gateway_required"}
 
     def apply(self, _frame: dict) -> dict:
-        raise RuntimeError("Savvy2 actuator gateway is not configured")
+        raise RuntimeError("verified actuator gateway is not configured")
 
     def hold(self) -> dict:
         return {"confirmed": False, "reason": "verified_actuator_gateway_required"}

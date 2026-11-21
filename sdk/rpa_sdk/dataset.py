@@ -635,7 +635,7 @@ def export_dataset(sources, destination, *, hz=30, max_age_ms=100, allow_b=False
     return manifest
 
 
-_SAVVY2_EVENT_TYPES = {
+_LEGACY_EVENT_TYPES = {
     "arm_ik_target": ("intended", "arm"),
     "arm_commanded": ("commanded", "arm"),
     "arm_applied": ("applied", "arm"),
@@ -652,25 +652,25 @@ _SAVVY2_EVENT_TYPES = {
 }
 
 
-def _savvy2_event(event):
-    kind = _string(event.get("event_type"), "Savvy2 event type", 96)
+def _legacy_event(event):
+    kind = _string(event.get("event_type"), "legacy event type", 96)
     stamp = _stamp(event.get("mono_ns"))
     if kind == "annotation":
         return stamp, "marks", {
             "label": _string(event.get("mark") or "unmarked", "mark label"),
-            "details": {"savvy2": event},
+            "details": {"source_event": event},
         }
-    payload = _object(event.get("payload", {}), "Savvy2 payload")
+    payload = _object(event.get("payload", {}), "legacy payload")
     role = event.get("stream")
     if kind == "pico_intent":
-        return stamp, "intended.pico", {"payload": payload, "savvy2": event}
-    if kind not in _SAVVY2_EVENT_TYPES:
-        return stamp, "legacy.event", {"savvy2": event}
-    category, component = _SAVVY2_EVENT_TYPES[kind]
+        return stamp, "intended.pico", {"payload": payload, "source_event": event}
+    if kind not in _LEGACY_EVENT_TYPES:
+        return stamp, "legacy.event", {"source_event": event}
+    category, component = _LEGACY_EVENT_TYPES[kind]
     name = f"{category}.{component}"
     if role is not None:
         name += "." + _stream(role)
-    normalized = {"payload": payload, "savvy2": event}
+    normalized = {"payload": payload, "source_event": event}
     if component == "arm":
         for key in ("q_target_deg", "q_deg", "joints_deg", "v"):
             values = payload.get(key)
@@ -689,8 +689,8 @@ def _savvy2_event(event):
     return stamp, name, normalized
 
 
-def _savvy2_required(meta):
-    original = _object(meta.get("required") or {}, "Savvy2 required components")
+def _legacy_required_streams(meta):
+    original = _object(meta.get("required") or {}, "legacy required components")
     result = ["intended.pico"]
     for role in original.get("arms", ("arm_a", "arm_b")):
         role = _stream(role)
@@ -707,31 +707,31 @@ def _savvy2_required(meta):
     return result
 
 
-def _savvy2_media(root, digests):
+def _legacy_media(root, digests, frame_schema):
     seen = set()
     last_cut = -1
     for frame in _json_lines(root / "frames.jsonl"):
-        if frame.get("schema_version") != "savvy2.episode.frame.v1":
-            raise ValueError("unsupported Savvy2 frame schema")
+        if frame.get("schema_version") != frame_schema:
+            raise ValueError("unexpected legacy episode frame schema")
         cut = _stamp(frame.get("frame_mono_ns"))
         if cut <= last_cut:
-            raise ValueError("Savvy2 frame timestamps must increase")
+            raise ValueError("legacy frame timestamps must increase")
         last_cut = cut
-        for role, relative in _object(frame.get("images", {}), "Savvy2 images").items():
+        for role, relative in _object(frame.get("images", {}), "legacy images").items():
             role = _stream(role)
             if relative is None:
                 continue
             if (not isinstance(relative, str) or not relative.startswith(f"images/{role}/")
                     or relative not in digests):
-                raise ValueError("Savvy2 frame does not reference a verified role image")
+                raise ValueError("legacy frame does not reference a verified role image")
             key = (role, relative)
             if key in seen:
                 continue
-            capture = _object(frame.get("capture_ts") or {}, "Savvy2 capture timestamps").get(f"image.{role}")
-            receive = _object(frame.get("recv_ts") or {}, "Savvy2 receive timestamps").get(f"image.{role}")
+            capture = _object(frame.get("capture_ts") or {}, "legacy capture timestamps").get(f"image.{role}")
+            receive = _object(frame.get("recv_ts") or {}, "legacy receive timestamps").get(f"image.{role}")
             stamp = _stamp(capture if capture is not None else receive if receive is not None else cut)
             if stamp > cut:
-                raise ValueError("Savvy2 frame references future media")
+                raise ValueError("legacy frame references future media")
             seen.add(key)
             yield stamp, role, relative, {
                 "legacy_path": relative,
@@ -739,14 +739,15 @@ def _savvy2_media(root, digests):
                 "receive_ns": receive,
                 "first_frame_cut_ns": cut,
                 "clock_reference": (
-                    "savvy2_robot_encode" if capture is not None else
-                    "savvy2_robot_receive" if receive is not None else "savvy2_frame_cut_proxy"
+                    "robot_encode" if capture is not None else
+                    "robot_receive" if receive is not None else "frame_cut_proxy"
                 ),
             }
 
 
-def import_savvy2(source, destination_root):
-    """Import a previously committed Savvy2 V1 episode, leaving it unchanged."""
+def import_legacy_episode(source, destination_root, *, schema_namespace):
+    """Import a committed legacy V1 episode for the specified schema namespace."""
+    schema_namespace = _stream(schema_namespace)
     root = _committed_directory(source)
     destination = Path(destination_root).expanduser().resolve()
     if destination == root or root in destination.parents:
@@ -755,25 +756,28 @@ def import_savvy2(source, destination_root):
     digests = _verify_checksums(root, required, allowed_unlisted={"annotations.json"})
     original = _file_object(root / "episode_meta.json")
     quality = _file_object(root / "quality_manifest.json")
-    if original.get("schema_version") != "savvy2.episode.meta.v1" or quality.get("grade") not in ("A", "B", "C"):
-        raise ValueError("expected a Savvy2 V1 episode with a quality grade")
+    if original.get("schema_version") != f"{schema_namespace}.episode.meta.v1":
+        raise ValueError("unexpected legacy episode metadata schema")
+    if quality.get("grade") not in ("A", "B", "C"):
+        raise ValueError("legacy episode must provide a quality grade")
     events = sorted(
-        (_savvy2_event(event) for event in _json_lines(root / "events.jsonl")),
+        (_legacy_event(event) for event in _json_lines(root / "events.jsonl")),
         key=lambda row: row[0],
     )
-    media = sorted(_savvy2_media(root, digests), key=lambda row: row[0])
+    frame_schema = f"{schema_namespace}.episode.frame.v1"
+    media = sorted(_legacy_media(root, digests, frame_schema), key=lambda row: row[0])
     meta = {
-        "source_format": "savvy2.episode.v1",
+        "source_format": "legacy.episode.v1",
         "source_episode_id": original.get("episode_id") or original.get("ep_id"),
         "source_episode_meta_sha256": digests["episode_meta.json"],
         "source_quality_grade": quality["grade"],
         "clock_verified": False,
-        "required_streams": _savvy2_required(original),
+        "required_streams": _legacy_required_streams(original),
     }
     store = EpisodeStore(destination)
     episode_id = store.start(
-        str(original.get("session_id") or "savvy2-import"),
-        str(original.get("task_name") or "savvy2-recording"),
+        str(original.get("session_id") or "legacy-import"),
+        str(original.get("task_name") or "legacy-recording"),
         meta,
     )["episode_id"]
     try:
@@ -783,7 +787,7 @@ def import_savvy2(source, destination_root):
             with _asset(root, relative).open("rb") as file:
                 image = file.read(MAX_IMAGE + 1)
             if hashlib.sha256(image).hexdigest() != digests[relative]:
-                raise ValueError("Savvy2 image changed during import")
+                raise ValueError("legacy image changed during import")
             store.append_image(episode_id, role, image, stamp, metadata=details)
         return store.stop(episode_id, str(original.get("result") or "complete"))
     except Exception:
@@ -808,9 +812,10 @@ def main(argv=None):
     for command in (clean, export):
         command.add_argument("--hz", type=int, default=30)
         command.add_argument("--max-age-ms", type=float, default=100)
-    ingest = commands.add_parser("import-savvy2", help="import one committed Savvy2 V1 episode")
+    ingest = commands.add_parser("import-legacy", help="import one committed legacy V1 episode")
     ingest.add_argument("episode")
     ingest.add_argument("output_root")
+    ingest.add_argument("--schema-namespace", required=True, help="namespace in the source schema versions")
     args = parser.parse_args(argv)
     try:
         if args.command == "verify":
@@ -826,7 +831,7 @@ def main(argv=None):
                 allow_b=args.allow_b, seed=args.seed,
             )
         else:
-            result = import_savvy2(args.episode, args.output_root)
+            result = import_legacy_episode(args.episode, args.output_root, schema_namespace=args.schema_namespace)
     except (OSError, ValueError, KeyError, RuntimeError) as error:
         parser.exit(1, f"dataset: {error}\n")
     print(json.dumps(result, ensure_ascii=False, indent=2))
